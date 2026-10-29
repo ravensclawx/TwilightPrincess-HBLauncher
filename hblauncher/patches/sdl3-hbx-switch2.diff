@@ -1,0 +1,434 @@
+diff -ruN sdl3-orig/CMakeLists.txt sdl3/CMakeLists.txt
+--- sdl3-orig/CMakeLists.txt	2026-10-28 13:48:37.760281680 -0500
++++ sdl3/CMakeLists.txt	2026-10-28 13:50:22.683134735 -0500
+@@ -1332,6 +1332,13 @@
+ # General SDL subsystem options, valid for all platforms
+ if(SDL_AUDIO)
+   # CheckDummyAudio/CheckDiskAudio - valid for all platforms
++  if(HBX_SWITCH2)
++    # HBLauncher Switch 2 (Linux personality): AudioOut + SDK pad drivers.
++    sdl_glob_sources("${SDL3_SOURCE_DIR}/src/audio/hbx/*.c" "${SDL3_SOURCE_DIR}/src/joystick/hbx/*.c")
++    sdl_compile_definitions(PRIVATE SDL_AUDIO_DRIVER_HBX=1 SDL_JOYSTICK_HBX=1)
++    sdl_include_directories(PRIVATE SYSTEM "${HBX_SDK_INCLUDE}")
++    set(HAVE_SDL_AUDIO TRUE)
++  endif()
+   if(SDL_DUMMYAUDIO)
+     set(SDL_AUDIO_DRIVER_DUMMY 1)
+     sdl_glob_sources(
+diff -ruN sdl3-orig/src/audio/hbx/SDL_hbxaudio.c sdl3/src/audio/hbx/SDL_hbxaudio.c
+--- sdl3-orig/src/audio/hbx/SDL_hbxaudio.c	1969-12-31 18:00:00.000000000 -0600
++++ sdl3/src/audio/hbx/SDL_hbxaudio.c	2026-10-28 13:49:30.114958865 -0500
+@@ -0,0 +1,213 @@
++/*
++  SDL audio driver for HBLauncher (Switch 2, Linux personality).
++
++  Plays through nn::audio AudioOut using the entrypoints the HBLauncher host
++  resolves into ctx->audio (the same path the native NES app uses).  The
++  AudioOut object, descriptors and PCM live in SDK-heap memory, which the
++  audio service accepts.  48 kHz, stereo, s16; SDL converts anything else.
++*/
++#include "SDL_internal.h"
++
++#ifdef SDL_AUDIO_DRIVER_HBX
++
++#include "../SDL_sysaudio.h"
++#include "hbx_sdk.h"
++
++extern const struct hbx_ctx *hbxl_ctx;
++void *hbxl_sdk_memalign(size_t align, size_t size);
++void hbxl_sdk_free(void *p);
++
++#define HBX_AUDIO_BUFFERS 4
++#define HBX_AUDIO_FRAMES 1024
++#define HBX_AUDIO_BUFFER_BYTES (HBX_AUDIO_FRAMES * 4)
++
++typedef void (*hbx_init_param_fn)(void *);
++typedef int32_t (*hbx_open_fn)(void *, const void *);
++typedef int32_t (*hbx_query_fn)(void *);
++typedef void (*hbx_set_info_fn)(void *, const void *, uint64_t, uint64_t);
++typedef int32_t (*hbx_append_fn)(void *, void *);
++typedef void *(*hbx_released_fn)(void *);
++
++struct hbx_audio_mem {
++    unsigned char object[0x800];
++    unsigned char descriptors[HBX_AUDIO_BUFFERS][0x40];
++    unsigned char pad[0x1000 - 0x800 - HBX_AUDIO_BUFFERS * 0x40];
++    unsigned char pcm[HBX_AUDIO_BUFFERS][HBX_AUDIO_BUFFER_BYTES];
++};
++
++struct SDL_PrivateAudioData
++{
++    struct hbx_audio_mem *mem;
++    bool busy[HBX_AUDIO_BUFFERS];
++    int queued;
++    int current;
++    bool started;
++    bool opened;
++};
++
++#define API(field, type) ((type)(uintptr_t)hbxl_ctx->audio.field)
++
++static void HBXAUDIO_Reclaim(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    int guard;
++    for (guard = 0; guard <= HBX_AUDIO_BUFFERS; guard++) {
++        void *released = API(released_buffer, hbx_released_fn)(h->mem->object);
++        int i;
++        if (!released) {
++            return;
++        }
++        for (i = 0; i < HBX_AUDIO_BUFFERS; i++) {
++            if (released == h->mem->descriptors[i] && h->busy[i]) {
++                h->busy[i] = false;
++                h->queued--;
++                break;
++            }
++        }
++    }
++}
++
++static int HBXAUDIO_FreeSlot(SDL_AudioDevice *device)
++{
++    int i;
++    for (i = 0; i < HBX_AUDIO_BUFFERS; i++) {
++        if (!device->hidden->busy[i]) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++static bool HBXAUDIO_WaitDevice(SDL_AudioDevice *device)
++{
++    while (!SDL_GetAtomicInt(&device->shutdown)) {
++        HBXAUDIO_Reclaim(device);
++        if (HBXAUDIO_FreeSlot(device) >= 0) {
++            return true;
++        }
++        SDL_Delay(2);
++    }
++    return true;
++}
++
++static Uint8 *HBXAUDIO_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_size)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    h->current = HBXAUDIO_FreeSlot(device);
++    if (h->current < 0) {
++        h->current = 0;     // WaitDevice guarantees a slot; stay defensive
++    }
++    *buffer_size = HBX_AUDIO_BUFFER_BYTES;
++    return h->mem->pcm[h->current];
++}
++
++static bool HBXAUDIO_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, int buflen)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    int i = h->current;
++    if (i < 0 || h->busy[i]) {
++        return true;
++    }
++    API(set_buffer_info, hbx_set_info_fn)(h->mem->descriptors[i], h->mem->pcm[i],
++                                          HBX_AUDIO_BUFFER_BYTES, (uint64_t)buflen);
++    if (API(append_buffer, hbx_append_fn)(h->mem->object, h->mem->descriptors[i]) != 1) {
++        return true;        // dropped; keep the stream alive
++    }
++    h->busy[i] = true;
++    h->queued++;
++    if (!h->started && h->queued >= 2) {
++        if (API(start, hbx_query_fn)(h->mem->object) == 0) {
++            h->started = true;
++        }
++    }
++    return true;
++}
++
++static void HBXAUDIO_CloseDevice(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *h = device->hidden;
++    int tries;
++    if (!h) {
++        return;
++    }
++    if (h->opened) {
++        if (h->started) {
++            API(stop, hbx_query_fn)(h->mem->object);
++        }
++        API(flush_buffers, hbx_query_fn)(h->mem->object);
++        for (tries = 0; tries < 40 && h->queued > 0; tries++) {
++            HBXAUDIO_Reclaim(device);
++            if (h->queued > 0) {
++                SDL_Delay(1);
++            }
++        }
++        if (hbxl_ctx->audio.close) {
++            API(close, hbx_query_fn)(h->mem->object);
++        }
++    }
++    if (h->mem) {
++        hbxl_sdk_free(h->mem);
++    }
++    SDL_free(h);
++    device->hidden = NULL;
++}
++
++static bool HBXAUDIO_OpenDevice(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *h;
++    uint32_t parameter[4] = { 0, 0, 0, 0 };
++
++    if (device->recording) {
++        return SDL_SetError("hbx: recording is not supported");
++    }
++    if (!hbxl_ctx || !hbxl_ctx->audio.open_default_audio_out || !hbxl_ctx->audio.append_buffer) {
++        return SDL_SetError("hbx: the host provided no AudioOut entrypoints");
++    }
++    h = (struct SDL_PrivateAudioData *)SDL_calloc(1, sizeof(*h));
++    if (!h) {
++        return false;
++    }
++    device->hidden = h;
++    h->mem = (struct hbx_audio_mem *)hbxl_sdk_memalign(0x1000, sizeof(struct hbx_audio_mem));
++    if (!h->mem) {
++        return SDL_SetError("hbx: no SDK heap memory for AudioOut");
++    }
++    SDL_memset(h->mem, 0, sizeof(*h->mem));
++
++    API(initialize_parameter, hbx_init_param_fn)(parameter);
++    parameter[0] = 48000;
++    parameter[1] = (parameter[1] & 0xFFFF0000u) | 2;
++    if (API(open_default_audio_out, hbx_open_fn)(h->mem->object, parameter) != 0) {
++        return SDL_SetError("hbx: OpenDefaultAudioOut failed");
++    }
++    h->opened = true;
++    if (API(sample_rate, hbx_query_fn)(h->mem->object) != 48000 ||
++        API(channel_count, hbx_query_fn)(h->mem->object) != 2 ||
++        API(sample_format, hbx_query_fn)(h->mem->object) != 2) {
++        return SDL_SetError("hbx: AudioOut format is not 48 kHz stereo s16");
++    }
++
++    device->spec.format = SDL_AUDIO_S16LE;
++    device->spec.channels = 2;
++    device->spec.freq = 48000;
++    device->sample_frames = HBX_AUDIO_FRAMES;
++    SDL_UpdatedAudioDeviceFormat(device);
++    return true;
++}
++
++static bool HBXAUDIO_Init(SDL_AudioDriverImpl *impl)
++{
++    impl->OpenDevice = HBXAUDIO_OpenDevice;
++    impl->CloseDevice = HBXAUDIO_CloseDevice;
++    impl->WaitDevice = HBXAUDIO_WaitDevice;
++    impl->GetDeviceBuf = HBXAUDIO_GetDeviceBuf;
++    impl->PlayDevice = HBXAUDIO_PlayDevice;
++    impl->OnlyHasDefaultPlaybackDevice = true;
++    return true;
++}
++
++AudioBootStrap HBXAUDIO_bootstrap = {
++    "hbx", "HBLauncher Switch 2 AudioOut", HBXAUDIO_Init, false, false
++};
++
++#endif // SDL_AUDIO_DRIVER_HBX
+diff -ruN sdl3-orig/src/audio/SDL_audio.c sdl3/src/audio/SDL_audio.c
+--- sdl3-orig/src/audio/SDL_audio.c	2026-10-28 13:48:37.783109711 -0500
++++ sdl3/src/audio/SDL_audio.c	2026-10-28 13:50:22.682830600 -0500
+@@ -26,6 +26,9 @@
+ 
+ // Available audio drivers
+ static const AudioBootStrap *const bootstrap[] = {
++#ifdef SDL_AUDIO_DRIVER_HBX
++    &HBXAUDIO_bootstrap,
++#endif
+ #ifdef SDL_AUDIO_DRIVER_PRIVATE
+     &PRIVATEAUDIO_bootstrap,
+ #endif
+diff -ruN sdl3-orig/src/audio/SDL_sysaudio.h sdl3/src/audio/SDL_sysaudio.h
+--- sdl3-orig/src/audio/SDL_sysaudio.h	2026-10-28 13:48:37.783458641 -0500
++++ sdl3/src/audio/SDL_sysaudio.h	2026-10-28 13:50:22.682679595 -0500
+@@ -381,6 +381,7 @@
+ extern AudioBootStrap COREAUDIO_bootstrap;
+ extern AudioBootStrap DISKAUDIO_bootstrap;
+ extern AudioBootStrap DUMMYAUDIO_bootstrap;
++extern AudioBootStrap HBXAUDIO_bootstrap;
+ extern AudioBootStrap AAUDIO_bootstrap;
+ extern AudioBootStrap OPENSLES_bootstrap;
+ extern AudioBootStrap PS2AUDIO_bootstrap;
+diff -ruN sdl3-orig/src/joystick/hbx/SDL_hbxjoystick.c sdl3/src/joystick/hbx/SDL_hbxjoystick.c
+--- sdl3-orig/src/joystick/hbx/SDL_hbxjoystick.c	1969-12-31 18:00:00.000000000 -0600
++++ sdl3/src/joystick/hbx/SDL_hbxjoystick.c	2026-10-28 13:50:13.497571040 -0500
+@@ -0,0 +1,148 @@
++/*
++  SDL joystick driver for HBLauncher (Switch 2, Linux personality).
++
++  One always-present Switch Pro style controller fed by the HBLauncher SDK
++  pad poll (hbx_input_poll: handheld, full-key and dual Joy-Con sources).
++  The GUID carries Nintendo's vendor/product so SDL reports a Switch Pro
++  gamepad type, and the mapping keeps Nintendo's positional layout
++  (B = south, A = east).
++*/
++#include "SDL_internal.h"
++
++#ifdef SDL_JOYSTICK_HBX
++
++#include "../SDL_sysjoystick.h"
++#include "../SDL_joystick_c.h"
++#include "hbx_sdk.h"
++#include "hbx_app.h"
++
++extern const struct hbx_ctx *hbxl_ctx;
++
++enum { HBXJ_A, HBXJ_B, HBXJ_X, HBXJ_Y, HBXJ_L, HBXJ_R, HBXJ_ZL, HBXJ_ZR, HBXJ_PLUS,
++       HBXJ_MINUS, HBXJ_LSTICK, HBXJ_RSTICK, HBXJ_BUTTONS };
++
++static const uint32_t hbxj_bits[HBXJ_BUTTONS] = {
++    HBX_A, HBX_B, HBX_X, HBX_Y, HBX_L, HBX_R, HBX_ZL, HBX_ZR, HBX_PLUS, HBX_MINUS,
++    HBX_STICK_L, HBX_STICK_R
++};
++
++static SDL_JoystickID hbxj_instance;
++static struct hbx_input_state hbxj_input;
++
++static SDL_GUID HBXJ_GUID(void)
++{
++    return SDL_CreateJoystickGUID(SDL_HARDWARE_BUS_VIRTUAL, 0x057e, 0x2009, 0x0100,
++                                  "Nintendo", "HBLauncher Controller", 'h', 0);
++}
++
++static bool HBXJ_Init(void)
++{
++    char guid[33];
++    char mapping[512];
++    if (!hbxl_ctx) {
++        return true;                // no controller outside HBLauncher
++    }
++    SDL_GUIDToString(HBXJ_GUID(), guid, sizeof(guid));
++    SDL_snprintf(mapping, sizeof(mapping),
++                 "%s,HBLauncher Controller,a:b%d,b:b%d,x:b%d,y:b%d,leftshoulder:b%d,"
++                 "rightshoulder:b%d,lefttrigger:b%d,righttrigger:b%d,start:b%d,back:b%d,"
++                 "leftstick:b%d,rightstick:b%d,dpup:h0.1,dpright:h0.2,dpdown:h0.4,"
++                 "dpleft:h0.8,leftx:a0,lefty:a1,rightx:a2,righty:a3,",
++                 guid, HBXJ_B, HBXJ_A, HBXJ_Y, HBXJ_X, HBXJ_L, HBXJ_R, HBXJ_ZL, HBXJ_ZR,
++                 HBXJ_PLUS, HBXJ_MINUS, HBXJ_LSTICK, HBXJ_RSTICK);
++    SDL_AddGamepadMapping(mapping);
++    hbxj_instance = SDL_GetNextObjectID();
++    SDL_PrivateJoystickAdded(hbxj_instance);
++    return true;
++}
++
++static int HBXJ_GetCount(void) { return hbxl_ctx ? 1 : 0; }
++static void HBXJ_Detect(void) {}
++static bool HBXJ_IsDevicePresent(Uint16 vendor_id, Uint16 product_id, Uint16 version, const char *name)
++{
++    return false;
++}
++static const char *HBXJ_GetDeviceName(int device_index) { return "HBLauncher Controller"; }
++static const char *HBXJ_GetDevicePath(int device_index) { return NULL; }
++static int HBXJ_GetDeviceSteamVirtualGamepadSlot(int device_index) { return -1; }
++static int HBXJ_GetDevicePlayerIndex(int device_index) { return 0; }
++static void HBXJ_SetDevicePlayerIndex(int device_index, int player_index) {}
++static SDL_GUID HBXJ_GetDeviceGUID(int device_index) { return HBXJ_GUID(); }
++static SDL_JoystickID HBXJ_GetDeviceInstanceID(int device_index) { return hbxj_instance; }
++
++static bool HBXJ_Open(SDL_Joystick *joystick, int device_index)
++{
++    joystick->nbuttons = HBXJ_BUTTONS;
++    joystick->naxes = 4;
++    joystick->nhats = 1;
++    SDL_memset(&hbxj_input, 0, sizeof(hbxj_input));
++    return true;
++}
++
++static bool HBXJ_Rumble(SDL_Joystick *joystick, Uint16 low, Uint16 high) { return SDL_Unsupported(); }
++static bool HBXJ_RumbleTriggers(SDL_Joystick *joystick, Uint16 l, Uint16 r) { return SDL_Unsupported(); }
++static bool HBXJ_SetLED(SDL_Joystick *joystick, Uint8 r, Uint8 g, Uint8 b) { return SDL_Unsupported(); }
++static bool HBXJ_SendEffect(SDL_Joystick *joystick, const void *data, int size) { return SDL_Unsupported(); }
++static bool HBXJ_SetSensorsEnabled(SDL_Joystick *joystick, bool enabled) { return SDL_Unsupported(); }
++
++static Sint16 HBXJ_Axis(int32_t v, bool invert)
++{
++    int32_t s = v * 327;
++    if (invert) {
++        s = -s;
++    }
++    if (s > 32767) s = 32767;
++    if (s < -32768) s = -32768;
++    return (Sint16)s;
++}
++
++static void HBXJ_Update(SDL_Joystick *joystick)
++{
++    Uint64 now = SDL_GetTicksNS();
++    Uint8 hat = SDL_HAT_CENTERED;
++    int i;
++    hbx_input_poll(hbxl_ctx, &hbxj_input);
++    for (i = 0; i < HBXJ_BUTTONS; i++) {
++        SDL_SendJoystickButton(now, joystick, (Uint8)i, (hbxj_input.buttons & hbxj_bits[i]) != 0);
++    }
++    if (hbxj_input.buttons & HBX_UP) hat |= SDL_HAT_UP;
++    if (hbxj_input.buttons & HBX_RIGHT) hat |= SDL_HAT_RIGHT;
++    if (hbxj_input.buttons & HBX_DOWN) hat |= SDL_HAT_DOWN;
++    if (hbxj_input.buttons & HBX_LEFT) hat |= SDL_HAT_LEFT;
++    SDL_SendJoystickHat(now, joystick, 0, hat);
++    // SDK sticks are -100..100 with +y up; SDL wants +y down.
++    SDL_SendJoystickAxis(now, joystick, 0, HBXJ_Axis(hbxj_input.stick_lx, false));
++    SDL_SendJoystickAxis(now, joystick, 1, HBXJ_Axis(hbxj_input.stick_ly, true));
++    SDL_SendJoystickAxis(now, joystick, 2, HBXJ_Axis(hbxj_input.stick_rx, false));
++    SDL_SendJoystickAxis(now, joystick, 3, HBXJ_Axis(hbxj_input.stick_ry, true));
++}
++
++static void HBXJ_Close(SDL_Joystick *joystick) {}
++static void HBXJ_Quit(void) {}
++static bool HBXJ_GetGamepadMapping(int device_index, SDL_GamepadMapping *out) { return false; }
++
++SDL_JoystickDriver SDL_HBX_JoystickDriver = {
++    HBXJ_Init,
++    HBXJ_GetCount,
++    HBXJ_Detect,
++    HBXJ_IsDevicePresent,
++    HBXJ_GetDeviceName,
++    HBXJ_GetDevicePath,
++    HBXJ_GetDeviceSteamVirtualGamepadSlot,
++    HBXJ_GetDevicePlayerIndex,
++    HBXJ_SetDevicePlayerIndex,
++    HBXJ_GetDeviceGUID,
++    HBXJ_GetDeviceInstanceID,
++    HBXJ_Open,
++    HBXJ_Rumble,
++    HBXJ_RumbleTriggers,
++    HBXJ_SetLED,
++    HBXJ_SendEffect,
++    HBXJ_SetSensorsEnabled,
++    HBXJ_Update,
++    HBXJ_Close,
++    HBXJ_Quit,
++    HBXJ_GetGamepadMapping
++};
++
++#endif // SDL_JOYSTICK_HBX
+diff -ruN sdl3-orig/src/joystick/SDL_joystick.c sdl3/src/joystick/SDL_joystick.c
+--- sdl3-orig/src/joystick/SDL_joystick.c	2026-10-28 13:48:37.798064517 -0500
++++ sdl3/src/joystick/SDL_joystick.c	2026-10-28 13:50:22.682467194 -0500
+@@ -106,6 +106,9 @@
+ #ifdef SDL_JOYSTICK_N3DS
+     &SDL_N3DS_JoystickDriver,
+ #endif
++#ifdef SDL_JOYSTICK_HBX
++    &SDL_HBX_JoystickDriver,
++#endif
+ #if defined(SDL_JOYSTICK_DUMMY) || defined(SDL_JOYSTICK_DISABLED)
+     &SDL_DUMMY_JoystickDriver
+ #endif
+diff -ruN sdl3-orig/src/joystick/SDL_sysjoystick.h sdl3/src/joystick/SDL_sysjoystick.h
+--- sdl3-orig/src/joystick/SDL_sysjoystick.h	2026-10-28 13:48:37.798187610 -0500
++++ sdl3/src/joystick/SDL_sysjoystick.h	2026-10-28 13:50:22.682603110 -0500
+@@ -248,6 +248,7 @@
+ extern SDL_JoystickDriver SDL_BSD_JoystickDriver;
+ extern SDL_JoystickDriver SDL_DARWIN_JoystickDriver;
+ extern SDL_JoystickDriver SDL_DUMMY_JoystickDriver;
++extern SDL_JoystickDriver SDL_HBX_JoystickDriver;
+ extern SDL_JoystickDriver SDL_EMSCRIPTEN_JoystickDriver;
+ extern SDL_JoystickDriver SDL_HAIKU_JoystickDriver;
+ extern SDL_JoystickDriver SDL_HIDAPI_JoystickDriver;

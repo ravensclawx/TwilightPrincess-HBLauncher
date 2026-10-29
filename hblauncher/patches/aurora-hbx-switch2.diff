@@ -1,0 +1,64 @@
+diff --git a/cmake/AuroraDawnProvider.cmake b/cmake/AuroraDawnProvider.cmake
+index 184d0ee..6a16e7f 100644
+--- a/cmake/AuroraDawnProvider.cmake
++++ b/cmake/AuroraDawnProvider.cmake
+@@ -121,7 +121,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
+     set(DAWN_SUPPORTS_GLFW_FOR_WINDOWING OFF CACHE INTERNAL "Disable Dawn GLFW windowing")
+     set(DAWN_FETCH_DEPENDENCIES ON CACHE INTERNAL
+       "Use fetch_dawn_dependencies.py as an alternative to using depot_tools")
+-    if (CMAKE_SYSTEM_NAME STREQUAL Linux)
++    if (CMAKE_SYSTEM_NAME STREQUAL Linux AND NOT HBX_SWITCH2)
+       set(DAWN_USE_WAYLAND ON CACHE INTERNAL "Enable support for Wayland surface")
+     endif ()
+     set(TINT_BUILD_TESTS OFF CACHE INTERNAL "Build tests")
+diff --git a/cmake/AuroraNodProvider.cmake b/cmake/AuroraNodProvider.cmake
+index 3bcbbdf..7f14398 100644
+--- a/cmake/AuroraNodProvider.cmake
++++ b/cmake/AuroraNodProvider.cmake
+@@ -38,7 +38,16 @@ if (_aurora_nod_provider STREQUAL "auto")
+   message(STATUS "aurora: nod auto-resolved provider: ${_aurora_nod_provider}")
+ endif ()
+ 
+-if (_aurora_nod_provider STREQUAL "vendor")
++if (_aurora_nod_provider STREQUAL "hbx")
++  # HBLauncher Switch 2: nod-lite (plain GameCube ISO reader) instead of the
++  # Rust nod library.  AURORA_NOD_LITE_DIR holds nod_lite.c and nod.h.
++  if (NOT TARGET nod::nod)
++    add_library(nod_lite STATIC "${AURORA_NOD_LITE_DIR}/nod_lite.c")
++    target_include_directories(nod_lite PUBLIC "${AURORA_NOD_LITE_DIR}")
++    target_link_libraries(nod_lite PUBLIC Threads::Threads)
++    add_library(nod::nod ALIAS nod_lite)
++  endif ()
++elseif (_aurora_nod_provider STREQUAL "vendor")
+   # ── Vendor: FetchContent + Corrosion build from source ──
+   if (NOT TARGET nod::nod)
+     message(STATUS "aurora: Building nod (provider=vendor, linkage=${AURORA_NOD_LINKAGE})")
+diff --git a/lib/dawn/BackendBinding.cpp b/lib/dawn/BackendBinding.cpp
+index 447ead8..3af6f49 100644
+--- a/lib/dawn/BackendBinding.cpp
++++ b/lib/dawn/BackendBinding.cpp
+@@ -8,6 +8,10 @@
+ #include <SDL3/SDL_video.h>
+ #endif
+ 
++#if defined(HBX_SWITCH2)
++extern "C" void* hbx_switch2_vi_window(void);
++#endif
++
+ namespace aurora::webgpu {
+ namespace utils {
+ 
+@@ -16,6 +20,13 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL
+ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Window* window) {
+ #if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_TVOS)
+   return SetupWindowAndGetSurfaceDescriptorCocoa(window);
++#elif defined(HBX_SWITCH2)
++  // HBLauncher Switch 2: present to the console's vi window (handed over by
++  // the launcher for exclusive apps) through Dawn's Switch surface path.
++  (void)window;
++  std::shared_ptr<wgpu::SurfaceSourceSwitchNWindow> desc = std::make_shared<wgpu::SurfaceSourceSwitchNWindow>();
++  desc->window = hbx_switch2_vi_window();
++  return std::move(desc);
+ #else
+   const auto props = SDL_GetWindowProperties(window);
+ #if defined(SDL_PLATFORM_ANDROID)

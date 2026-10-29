@@ -1,0 +1,10 @@
+TARGET = aarch64-linux-musl
+OUTPUT = $(CURDIR)/toolchain
+GCC_VER = 15.1.0
+MUSL_VER = 1.2.6
+BINUTILS_VER = 2.44
+COMMON_CONFIG += CFLAGS="-g0 -O2" CXXFLAGS="-g0 -O2" LDFLAGS="-s"
+# Console code pages are BTI-guarded: every target library gets landing pads.
+GCC_CONFIG += --enable-languages=c,c++ --disable-multilib --disable-libsanitizer --enable-default-pie=no --disable-libquadmath
+GCC_CONFIG += CFLAGS_FOR_TARGET="-O2 -g0 -mbranch-protection=bti" CXXFLAGS_FOR_TARGET="-O2 -g0 -mbranch-protection=bti"
+MUSL_CONFIG += CFLAGS="-O2 -g0 -mbranch-protection=bti"

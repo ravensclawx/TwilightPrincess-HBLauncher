@@ -1,0 +1,19 @@
+{
+  "id": "twilight",
+  "name": "Twilight Princess",
+  "description": "Dusklight (zeldaret/tp decompilation) - your own GZ2E01 disc, served from the PC",
+  "version": "0.1.0",
+  "abi": 3,
+  "kind": "native",
+  "display": "exclusive",
+  "sources": [],
+  "linux": {
+    "code_base": "0x30000000",
+    "data_base": "0x38000000"
+  },
+  "limits": {
+    "heap_bytes": 65536,
+    "stack_bytes": 1048576,
+    "frames": 0
+  }
+}

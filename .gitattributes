@@ -11,3 +11,6 @@
 
 # decomp-toolkit writes files with LF
 config/**/*.txt  text eol=lf
+
+# Unified patches retain context-line whitespace.
+hblauncher/patches/*.diff -whitespace

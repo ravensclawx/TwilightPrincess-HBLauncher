@@ -1,56 +1,128 @@
-<div align="center">
-  <img src="res/logo.png" alt="Logo" width="640">
+# Twilight Princess for HBLauncher
 
-  <p align="center">
-    <a href="https://twilitrealm.dev">Official Website</a>
-    •
-    <a href="https://discord.gg/6NpMhefCK9">Discord</a>
-  </p>
-</div>
+A Switch 2 HBLauncher port of [TwilitRealm/Dusklight](https://github.com/TwilitRealm/dusklight),
+based on the Twilight Princess decompilation. Maintained by **@ravensclawx**.
 
-# Overview
+The native AArch64 game runs through HBLauncher's Linux personality. Aurora
+renders through Dawn/Vulkan into the console's display. The included `nod-lite`
+adapter reads plain GameCube ISO images. This setup targets your own **GZ2E01
+USA GameCube** disc; compressed RVZ/WIA images need conversion to ISO first.
 
-Dusklight is a reverse-engineered reimplementation of Twilight Princess.
+## Set up HBLauncher first
 
-It aims to be as accurate as possible to the original while also providing new options, enhancements, and tools to customize your experience.
+These apps run inside [HBLauncher](https://github.com/ravensclawx/HBLauncher)
+on Nintendo Switch 2. Follow the
+[HBLauncher Getting Started guide](https://github.com/ravensclawx/HBLauncher/blob/main/docs/GETTING_STARTED.md)
+to install the launcher, set up its external session runner, and establish the
+required verified session. Then follow this README's **Build** and **Install and
+run** sections to add the game to your app library and start its file server.
+Launch the game from HBLauncher's library while that server is running.
 
-> [!IMPORTANT]
-> Dusklight's official website is https://twilitrealm.dev/, any other website is not affiliated and may be promoting AI-generated misinformation.
+## Requirements
 
-# Setup
+- [HBLauncher](https://github.com/ravensclawx/HBLauncher), with ABI 3 and its Linux personality runtime.
+- Linux, Python 3, Git, CMake, Ninja, and a patched `aarch64-linux-musl` toolchain.
+- Your own supported game disc image. This integration adds no disc images, extracted game data, or private saves.
+  Upstream source resources retain their original notices.
 
-> [!IMPORTANT]
-> Dusklight does *not* provide any copyrighted assets. You must provide your own copy of the original game.
+These are experimental Switch 2 ports. A successful build does not establish
+console compatibility or gameplay performance. Hardware testing of these new
+standalone packages is still required.
 
-> [!IMPORTANT]
-> At a minimum, Dusklight requires a GPU with support for D3D12, Vulkan 1.1+, or Metal. For older devices, best-effort support is provided for D3D11 and OpenGL ES (Android), but will not achieve full accuracy or performance. Your experience with specific hardware, operating systems, and drivers may vary.
+## Toolchain
 
-### 1. Dump your game
+Set the SDK and compiler locations (replace the example paths):
 
-You must dump your own copy of the game. Please see [this article](https://wiki.dolphin-emu.org/index.php?title=Ripping_Games) for instructions. After dumping, you can use a program like [Dolphin](https://dolphin-emu.org/) or [nodtool](https://github.com/encounter/nod/releases) to convert the `.iso` to `.rvz` to save space.
+```sh
+export HBL_ROOT=/path/to/HBLauncher
+export HBXL_TOOLCHAIN=/path/to/patched-toolchain
+```
 
-Dusklight currently supports all commercial discs except for Wii's Korean release.
+An ordinary Linux cross-compiler is insufficient: musl must route syscalls
+through HBLauncher's `__hbx_syscall`, and target libraries need BTI landing pads.
+The known configuration uses GCC 15.1.0, musl 1.2.6, and binutils 2.44. To build
+it with musl-cross-make:
 
-> [!NOTE]
-> Dusklight is based on the [Twilight Princess decompilation](https://github.com/zeldaret/tp), which is currently only matching for GameCube. As a result, even when playing Dusklight with a Wii disc, you will be presented with the GameCube version's HUD and certain other specificities.
+```sh
+git clone https://github.com/richfelker/musl-cross-make.git toolchain-src
+git -C toolchain-src checkout 5e8042e63de29f8473fc3b0b831a587ba284e1a8
+cp hblauncher/cmake/config.mak.example toolchain-src/config.mak
+mkdir -p toolchain-src/patches/musl-1.2.6
+cp "$HBL_ROOT/sdk/linux/musl-hbx-syscall-hooks.diff"   toolchain-src/patches/musl-1.2.6/9001-hbx-syscall-hooks.diff
+make -C toolchain-src -j8
+make -C toolchain-src install
+export HBXL_TOOLCHAIN="$PWD/toolchain-src/toolchain"
+```
 
-### 2. Install Dusklight
+Compiler sources and downloads remain local; they are not part of this fork.
 
-Visit the [official installation guide](https://twilitrealm.dev/install/) for full instructions.
+## Build
 
-# Building
+Clone with submodules, or initialize them in an existing checkout:
 
-If you'd like to build Dusklight from source, please read the [build instructions](docs/building.md).
+```sh
+git submodule update --init --recursive
+python3 hblauncher/dependencies.py fetch
+export DAWN_SOURCE="$PWD/hblauncher/deps/dawn"
+export SDL3_SOURCE="$PWD/hblauncher/deps/sdl3"
+python3 hblauncher/build.py build --jobs 8
+```
 
-Pull requests are welcomed! Note that we do not accept contributions that are primarily AI-generated and will close your PR if we suspect as much. Please also see the [code conventions](docs/code-conventions.md).
+The build applies the included Aurora patch to the pinned Aurora submodule,
+then builds the static game and dependencies using the HBLauncher linker script
+and runtime. Rerunning the script recognizes an already applied patch. A modified
+Aurora submodule after configuration is expected; the patch is kept in this
+repository instead of requiring an unpublished submodule commit.
 
-# Credits
+You may set `DAWN_SOURCE` and `SDL3_SOURCE` to existing matching, patched source
+trees. `build.py configure` only configures. Additional `-D...` arguments are
+passed to CMake. The default code/data addresses are `0x30000000` / `0x38000000`.
+Code mods and Opus are disabled in this configuration. This is the GameCube
+port, not a Wii emulator.
 
-Special thanks to the [TP decompilation](https://github.com/zeldaret/tp) team, the GC/Wii decompilation community, the [Aurora](https://github.com/encounter/aurora) developers, the [TP speedrunning community](https://zsrtp.link), and all [contributors](https://github.com/TwilitRealm/dusklight/graphs/contributors).
+## Install and run
 
-<br/>
-<div align="center">
-    <a href="https://github.com/encounter/aurora">
-        <img src="assets/aurora-powered.png" alt="Powered by Aurora" width="800">
-    </a>
-</div>
+The resulting app directory is `hblauncher/dist/twilight`. Copy that whole
+directory into `$HBL_ROOT/apps/`, or run:
+
+```sh
+python3 hblauncher/build.py install
+```
+
+Installation refuses to overwrite an existing app directory. Only the manifest,
+code/data images, and matching build report are installed; there is no bundled
+commercial game artwork. To package an already linked game without rebuilding,
+use `python3 hblauncher/build.py pack --elf /path/to/dusklight.elf`.
+
+Create a private file-server root:
+
+```sh
+mkdir -p hblauncher/fsroot/tp
+cp /path/to/your/GZ2E01.iso hblauncher/fsroot/tp/GZ2E01.iso
+cp -R res hblauncher/fsroot/res
+printf 'HBXL_PRELOAD=/tp/GZ2E01.iso\n' > hblauncher/fsroot/hbxl-env
+python3 hblauncher/build.py serve
+```
+
+The server uses `10.42.0.1:39501`, the runtime default. Keep it running,
+establish a verified HBLauncher session, and select **Twilight Princess**.
+Select your disc from `/tp/GZ2E01.iso` when the game asks. The file-server root
+also receives configuration and saves; keep them private and back up saves
+before replacing a local setup. Read `README.upstream.md` for upstream controls
+and required game resources.
+
+## Source and credits
+
+Upstream history and licensing are preserved. Read [LICENSE.md](LICENSE.md),
+[the upstream README](README.upstream.md), and
+[the integration notices](hblauncher/THIRD_PARTY.md). HBLauncher integration
+additions use [MIT](hblauncher/LICENSE.integration). Original upstream CI is
+disabled for this port branch; local build instructions above target HBLauncher.
+
+## Source archive
+
+`python3 hblauncher/package-source.py` writes a source-only archive under
+`hblauncher/dist/`. Initialize submodules before packaging Twilight Princess.
+The archive includes their source and the applied Aurora changes. It excludes
+local dependencies, build output, discs, saves, and file-server data. Build the
+app locally using the instructions above; generated app packages are ignored by Git.

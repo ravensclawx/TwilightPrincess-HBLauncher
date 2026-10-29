@@ -1,0 +1,146 @@
+diff -ruN dawn-orig/src/dawn/common/vulkan_platform.h dawn/src/dawn/common/vulkan_platform.h
+--- dawn-orig/src/dawn/common/vulkan_platform.h	2026-08-07 17:55:40.000000000 -0500
++++ dawn/src/dawn/common/vulkan_platform.h	2026-10-28 13:16:35.744413121 -0500
+@@ -186,7 +186,7 @@
+ #endif
+ #endif  // DAWN_PLATFORM_IS(FUCHSIA)
+ 
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+ #ifndef VK_USE_PLATFORM_VI_NN
+ #define VK_USE_PLATFORM_VI_NN
+ #endif
+diff -ruN dawn-orig/src/dawn/native/Surface.cpp dawn/src/dawn/native/Surface.cpp
+--- dawn-orig/src/dawn/native/Surface.cpp	2026-08-07 17:55:40.000000000 -0500
++++ dawn/src/dawn/native/Surface.cpp	2026-10-28 13:16:35.742021843 -0500
+@@ -181,7 +181,7 @@
+             return descriptor;
+         }
+ #endif  // defined(DAWN_USE_WINDOWS_UI)
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+         case wgpu::SType::SurfaceSourceSwitchNWindow: {
+             auto* subDesc = descriptor.Get<SurfaceSourceSwitchNWindow>();
+             DAWN_ASSERT(subDesc != nullptr);
+diff -ruN dawn-orig/src/dawn/native/vulkan/BackendVk.cpp dawn/src/dawn/native/vulkan/BackendVk.cpp
+--- dawn-orig/src/dawn/native/vulkan/BackendVk.cpp	2026-08-07 17:55:40.000000000 -0500
++++ dawn/src/dawn/native/vulkan/BackendVk.cpp	2026-10-28 13:16:35.750823844 -0500
+@@ -58,7 +58,11 @@
+ #endif
+ 
+ #if DAWN_PLATFORM_IS(LINUX)
+-#if DAWN_PLATFORM_IS(ANDROID)
++#if defined(HBX_SWITCH2)
++// HBLauncher Switch 2: Vulkan comes from the console process, not a shared
++// library; vk_icdGetInstanceProcAddr is provided by the app runtime.
++constexpr char kVulkanLibName[] = "";
++#elif DAWN_PLATFORM_IS(ANDROID)
+ constexpr char kVulkanLibName[] = "libvulkan.so";
+ #else
+ constexpr char kVulkanLibName[] = "libvulkan.so.1";
+diff -ruN dawn-orig/src/dawn/native/vulkan/SwapChainVk.cpp dawn/src/dawn/native/vulkan/SwapChainVk.cpp
+--- dawn-orig/src/dawn/native/vulkan/SwapChainVk.cpp	2026-08-07 17:55:40.000000000 -0500
++++ dawn/src/dawn/native/vulkan/SwapChainVk.cpp	2026-10-28 13:32:22.987891839 -0500
+@@ -296,6 +296,23 @@
+             "Vulkan SwapChain must support %s with sRGB colorspace.", config.wgpuFormat));
+     }
+ 
++#if defined(HBX_SWITCH2)
++    // HBLauncher Switch 2: the vi surface does not list IDENTITY; use the
++    // surface's current transform (as the native launcher does) and the first
++    // supported composite alpha mode.
++    config.transform = surfaceInfo.capabilities.currentTransform;
++    config.alphaMode = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
++    if ((surfaceInfo.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) == 0) {
++        for (VkCompositeAlphaFlagBitsKHR mode : {VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
++                                                 VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
++                                                 VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR}) {
++            if (surfaceInfo.capabilities.supportedCompositeAlpha & mode) {
++                config.alphaMode = mode;
++                break;
++            }
++        }
++    }
++#else
+     // Only the identity transform with opaque alpha is supported for now.
+     DAWN_INVALID_IF(
+         (surfaceInfo.capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) == 0,
+@@ -304,7 +321,8 @@
+     config.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+ 
+     config.alphaMode = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+-#if !DAWN_PLATFORM_IS(ANDROID)
++#endif
++#if !DAWN_PLATFORM_IS(ANDROID) && !defined(HBX_SWITCH2)
+     DAWN_INVALID_IF(
+         (surfaceInfo.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) == 0,
+         "Vulkan SwapChain must support opaque alpha.");
+@@ -666,7 +684,7 @@
+ 
+ #endif  // DAWN_PLATFORM_IS(ANDROID)
+ 
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+         case Surface::Type::SwitchNWindow: {
+             if (info.HasExt(InstanceExt::ViSurface)) {
+                 DAWN_ASSERT(surface->GetSwitchNWindow() != nullptr);
+diff -ruN dawn-orig/src/dawn/native/vulkan/VulkanFunctions.cpp dawn/src/dawn/native/vulkan/VulkanFunctions.cpp
+--- dawn-orig/src/dawn/native/vulkan/VulkanFunctions.cpp	2026-08-07 17:55:40.000000000 -0500
++++ dawn/src/dawn/native/vulkan/VulkanFunctions.cpp	2026-10-28 13:16:35.740971489 -0500
+@@ -35,7 +35,7 @@
+ 
+ namespace dawn::native::vulkan {
+ 
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+ extern "C" {
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName);
+ }
+@@ -95,7 +95,7 @@
+     } while (0)
+ 
+ MaybeError VulkanFunctions::LoadGlobalProcs(const DynamicLib& vulkanLib) {
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+     (void)vulkanLib;
+     GetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+         vk_icdGetInstanceProcAddr(VK_NULL_HANDLE, "vkGetInstanceProcAddr"));
+@@ -408,25 +408,25 @@
+     GET_DEVICE_PROC_ALIAS(BindImageMemory2, BindImageMemory2KHR);
+     GET_DEVICE_PROC_ALIAS(CmdDispatchBase, CmdDispatchBaseKHR);
+     GET_DEVICE_PROC_ALIAS(CmdSetDeviceMask, CmdSetDeviceMaskKHR);
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+     GET_DEVICE_PROC_ALIAS_NO_ERROR(CreateDescriptorUpdateTemplate,
+                                    CreateDescriptorUpdateTemplateKHR);
+ #else
+     GET_DEVICE_PROC_ALIAS(CreateDescriptorUpdateTemplate, CreateDescriptorUpdateTemplateKHR);
+ #endif
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+     GET_DEVICE_PROC_ALIAS_NO_ERROR(CreateSamplerYcbcrConversion,
+                                    CreateSamplerYcbcrConversionKHR);
+ #else
+     GET_DEVICE_PROC_ALIAS(CreateSamplerYcbcrConversion, CreateSamplerYcbcrConversionKHR);
+ #endif
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+     GET_DEVICE_PROC_ALIAS_NO_ERROR(DestroyDescriptorUpdateTemplate,
+                                    DestroyDescriptorUpdateTemplateKHR);
+ #else
+     GET_DEVICE_PROC_ALIAS(DestroyDescriptorUpdateTemplate, DestroyDescriptorUpdateTemplateKHR);
+ #endif
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+     GET_DEVICE_PROC_ALIAS_NO_ERROR(DestroySamplerYcbcrConversion,
+                                    DestroySamplerYcbcrConversionKHR);
+ #else
+@@ -439,7 +439,7 @@
+     GET_DEVICE_PROC_ALIAS(GetImageMemoryRequirements2, GetImageMemoryRequirements2KHR);
+     GET_DEVICE_PROC_ALIAS(GetImageSparseMemoryRequirements2, GetImageSparseMemoryRequirements2KHR);
+     GET_DEVICE_PROC_ALIAS(TrimCommandPool, TrimCommandPoolKHR);
+-#if DAWN_PLATFORM_IS(SWITCH)
++#if DAWN_PLATFORM_IS(SWITCH) || defined(HBX_SWITCH2)  // HBLauncher Switch 2 (Linux personality)
+     GET_DEVICE_PROC_ALIAS_NO_ERROR(UpdateDescriptorSetWithTemplate,
+                                    UpdateDescriptorSetWithTemplateKHR);
+ #else

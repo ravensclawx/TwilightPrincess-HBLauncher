@@ -467,13 +467,13 @@ static void dummy2() {
     J3DIndTexMtx* indTexMtx = JKR_NEW J3DIndTexMtx();
     J3DIndTexCoordScale* indTexCoordScale = JKR_NEW J3DIndTexCoordScale();
     J3DColorBlock* colorBlock = NULL;
-    colorBlock->setColorChanNum((u8)NULL);
+    colorBlock->setColorChanNum((u8)0);
     colorBlock->setMatColor(0, gxColor);
     colorBlock->setColorChan(0, colorChan);
     colorBlock->setAmbColor(0, gxColor);
 
     J3DTexGenBlock* texGenBlock = NULL;
-    texGenBlock->setTexGenNum((u32)NULL);
+    texGenBlock->setTexGenNum((u32)0);
     texGenBlock->setTexCoord(0, NULL);
 
     J3DTevBlock* tevBlock = NULL;

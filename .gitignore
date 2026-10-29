@@ -53,3 +53,20 @@ compile_commands.json
 pipeline_cache.bin
 
 extract
+
+# HBLauncher local output and user data
+/hblauncher/build/
+/hblauncher/dist/
+/hblauncher/deps/
+/hblauncher/fsroot/
+/hblauncher/app/build/
+*.local.json
+.env
+*.iso
+*.gcm
+*.rvz
+*.ciso
+*.sav
+/toolchain-src/
+__pycache__/
+*.pyc

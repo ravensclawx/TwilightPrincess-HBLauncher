@@ -1,0 +1,21 @@
+{
+  "upstream": "77705f8bb95ef7b7dca4675b149c4bcb6a48da34",
+  "dawn": {
+    "repository": "https://github.com/encounter/dawn",
+    "commit": "1155e0ed531126f33a1279afa029349651ca1c93"
+  },
+  "runtime": {
+    "repository": "https://github.com/ravensclawx/HBLauncher",
+    "abi": 3,
+    "toolchain": "GCC 15.1.0, musl 1.2.6, binutils 2.44; syscall hooks required"
+  },
+  "sdl3": {
+    "repository": "https://github.com/libsdl-org/SDL",
+    "commit": "8e37db5e797b6167f3a00d697d816a684bd259c7",
+    "version": "3.4.10"
+  },
+  "musl-cross-make": {
+    "repository": "https://github.com/richfelker/musl-cross-make",
+    "commit": "5e8042e63de29f8473fc3b0b831a587ba284e1a8"
+  }
+}
